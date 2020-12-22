@@ -1,0 +1,354 @@
+---
+title: "Flu Shot Learning Dashboard"
+output: flexdashboard::flex_dashboard
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(rmarkdown)
+library(knitr)
+library(Hmisc)
+library(DT)
+library(data.table)
+library(Matrix)
+library(xgboost)
+
+assignInNamespace("cedta.override", c(data.table:::cedta.override,"rmarkdown"), "data.table")
+opts_chunk$set(echo = FALSE, comment = "", warning = FALSE, message = FALSE, tidy.opts = list(width.cutoff = 55), tidy = TRUE)
+```
+
+```{r libraries, include=FALSE}
+library(data.table)
+library(DT)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(corrplot)
+library(caret)
+```
+
+```{r load_data, include=FALSE}
+features <- fread(input = "../Data/training_set_features.csv")
+labels <- fread(input = "../Data/training_set_labels.csv")
+data <- merge(x = features, y = labels, by = "respondent_id")
+```
+
+```{r constants, include=FALSE}
+id.name <- "respondent_id"
+
+age.group.name <- "age_group"
+education.name <- "education"
+race.name <- "race"
+sex.name <- "sex"
+income.poverty.name <- "income_poverty"
+marital.status.name <- "marital_status"
+house.status.name <- "rent_or_own"
+employment.status.name  <- "employment_status"
+geo.name <- "hhs_geo_region"
+msa.name <- "census_msa"
+employment.industry.name <- "employment_industry"
+employment.occupation.name <- "employment_occupation"
+h1n1.vacc <- "h1n1_vaccine"
+seas.vacc <- "seasonal_vaccine"
+
+behavioral.pattern <- "behavioral_"
+opinion.pattern <- "opinion_"
+```
+
+```{r define_variables}
+# Fill blanks with "Unknown" for respondent variables
+cols <- c(education.name, income.poverty.name, marital.status.name, house.status.name, 
+          employment.status.name, employment.industry.name, employment.occupation.name)
+data[, (cols) := lapply(.SD, function(x){ifelse(nchar(x) == 0, "Unknown", x)}), .SD = cols]
+
+# Transform the variables into categorical variables
+cols <- c(age.group.name, education.name, race.name, sex.name, income.poverty.name, marital.status.name, house.status.name, 
+          employment.status.name, geo.name, msa.name, employment.industry.name, employment.occupation.name, h1n1.vacc, seas.vacc)
+data <- data[, (cols) := lapply(X = .SD, FUN = as.factor), .SDcols = cols]
+
+unique.age.groups <- data[, sort(unique(get(age.group.name)))]
+unique.education <- data[, sort(unique(get(education.name)))]
+unique.race <- data[, sort(unique(get(race.name)))]
+unique.sex <- data[, sort(unique(get(sex.name)))]
+unique.income.poverty <- data[, sort(unique(get(income.poverty.name)))]
+unique.marital.status <- data[, sort(unique(get(marital.status.name)))]
+unique.house.status <- data[, sort(unique(get(house.status.name)))]
+unique.employment.status <- data[, sort(unique(get(employment.status.name)))]
+unique.geo <- data[, sort(unique(get(geo.name)))]
+unique.msa <- data[, sort(unique(get(msa.name)))]
+unique.employment.industry <- data[, sort(unique(get(employment.industry.name)))]
+unique.employment.occupation <- data[, sort(unique(get(employment.occupation.name)))]
+
+respondent.variables <- c(age.group.name, education.name, race.name, sex.name, income.poverty.name, marital.status.name,
+                          house.status.name, employment.status.name, geo.name, msa.name, employment.industry.name, 
+                          employment.occupation.name)
+
+behavioral.factors <- names(data)[grep(pattern = behavioral.pattern, x = names(data))]
+opinion.factors <- names(data)[grep(patter = opinion.pattern, x = names(data))]
+```
+
+```{r functions, include=FALSE}
+round.numerics <- function(x, digits){
+  if(is.numeric(x)){
+    x = round(x = x, digits = digits)
+  }
+  return(x)
+}
+
+percentage.table = function(x, digits = 2){
+  tab = table(x)
+  percentage.tab = 100*tab/(sum(tab))
+  rounded.tab = round(x = percentage.tab, digits = digits)
+  return(rounded.tab)
+}
+
+fit.model <- function(data, target.name, number, nround){
+  if (target.name == h1n1.vacc){
+    data[, seas.vacc] <- NULL
+    sparse.matrix <- sparse.model.matrix(h1n1_vaccine~., data = data)[, -1]
+    xgb.matrix <- xgb.DMatrix(sparse.matrix, label = as.numeric(as.character(data$h1n1_vaccine)))
+    mod <- xgboost(data = xgb.matrix, nrounds = nround, eta = 0.3, max_depth = 2, gamma = 0.7, colsample_bytree = 1, 
+                   min_child_weight = 3, subsample = 1, objective = "binary:logistic")
+    dt <- datatable(xgb.importance(feature_names = colnames(sparse.matrix), model = mod)[1:number])
+    }
+  if (target.name == seas.vacc){
+    data[, h1n1.vacc] <- NULL
+    sparse.matrix <- sparse.model.matrix(seasonal_vaccine~., data = data)[, -1]
+    xgb.matrix <- xgb.DMatrix(sparse.matrix, label = as.numeric(as.character(data$seasonal_vaccine)))
+    mod <- xgboost(data = xgb.matrix, nrounds = nround, eta = 0.025, max_depth = 3, gamma = 0.1, colsample_bytree = 0.8,
+                   min_child_weight = 1, subsample = 0.5, objective = "binary:logistic")
+    dt <- datatable(xgb.importance(feature_names = colnames(sparse.matrix), model = mod)[1:number])
+    }
+  return(dt)
+}
+```
+
+Introduction
+=====================================  
+
+We are analyzing data from the the National 2009 H1N1 Flu Survey.
+
+The survey was given to `r data[, length(unique(get(id.name)))]` respondents. The survey contains information about respondents and their behavior and opinions towards H1N1 and seasonal flu vaccines. 
+
+
+Respondent Variables
+===================================
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r 1_input}
+inputPanel(
+  selectInput(inputId = "respondent_variable", label = "Select Variable:", choices = respondent.variables, 
+              selected = respondent.variables[1]),
+  checkboxInput(inputId = "respondent_show_percentages", label = "Show Percentages", value = TRUE),
+  sliderInput(inputId = "respondent_digits", label = "Digits", min = 0, max = 5, value = 1, step = 1),
+  checkboxInput(inputId = "respondent_descending", label = "In Descending Order", value = FALSE)
+)
+# input = list(respondent_variable = respondent.variables[1], respondent_show_percentages = TRUE, respondent_digits = 1, respondent_descending = FALSE)
+```
+
+Row {data-height=500}
+-------------------------------------
+
+```{r 1_output}
+renderPlot({
+  tab = percentage.table(x = data[, get(input$respondent_variable)])
+  
+  if(input$respondent_descending == TRUE){
+    tab = tab[order(-tab)]
+  }
+  
+  barplot(height = tab, space = 0.01, las = 1, main = input$respondent_variable, ylab = "Percentage",  
+          ylim = c(0, 1.2*max(tab, na.rm = TRUE)), xaxt = "n", col = "skyblue2")
+  text(x = -0.4 + 1:length(tab), y = -0.5, labels = names(tab), srt = 30, xpd = TRUE, adj = 1)
+  
+  if(input$respondent_show_percentages == TRUE){
+    space_val = 0
+    text(x = -0.4 + 1:length(tab) * (1 + space_val), y = tab, labels = sprintf("%.*f%%", input$respondent_digits, tab), pos = 3)
+  }
+})
+```
+
+
+Opinions on Vaccines
+=====================================  
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r 2_input}
+inputPanel(
+  selectInput(inputId = "ov_opinion.factors", label = "Select Opinions on Vaccines:", choices = opinion.factors, selected = opinion.factors[1]),
+  checkboxInput(inputId = "ov_show_percentages", label = "Show Percentages", value = TRUE),
+  sliderInput(inputId = "ov_digits", label = "Digits", min = 0, max = 5, value = 1, step = 1),
+  selectInput(inputId = "ov_age_group", label = "Age", choices = unique.age.groups, selected = unique.age.groups, multiple = TRUE),
+  selectInput(inputId = "ov_education", label = "Education", choices = unique.education, selected = unique.education, multiple = TRUE),
+  selectInput(inputId = "ov_race", label = "Race", choices = unique.race, selected = unique.race, multiple = TRUE),
+  selectInput(inputId = "ov_sex", label = "Sex", choices = unique.sex, selected = unique.sex, multiple = TRUE),
+  selectInput(inputId = "ov_income_poverty", label = "Household Income", choices = unique.income.poverty, selected = unique.income.poverty, multiple = TRUE),
+  selectInput(inputId = "ov_marital_status", label = "Marital Status", choices = unique.marital.status, selected = unique.marital.status, multiple = TRUE),
+  selectInput(inputId = "ov_house_status", label = "House Status", choices = unique.house.status, selected = unique.house.status, multiple = TRUE),
+  selectInput(inputId = "ov_geo", label = "Geographic Region", choices = unique.geo, selected = unique.geo, multiple = TRUE),
+  selectInput(inputId = "ov_msa", label = "Metropolitan Statistical Area", choices = unique.msa, selected = unique.msa, multiple = TRUE),
+  selectInput(inputId = "ov_employment_status", label = "Employment Status", choices = unique.employment.status, selected = unique.employment.status, multiple = TRUE),
+  selectInput(inputId = "ov_employment_industry", label = "Employment Industry", choices = unique.employment.industry, selected = unique.employment.industry, multiple = TRUE),
+  selectInput(inputId = "ov_employment_occupation", label = "Employment Occupation", choices = unique.employment.occupation, selected = unique.employment.occupation, multiple = TRUE)
+)
+# input = list(ov_opinion.factors = opinion.factors[1], ov_show_percentages = TRUE, ov_digits = 1, ov_age_group = unique.age.groups, ov_education = unique.education, ov_race = unique.race, ov_sex = unique.sex, ov_income_poverty = unique.income.poverty, ov_marital_status = unique.marital.status, ov_house_status = unique.house.status, ov_geo = unique.geo, ov_msa = unique.msa, ov_employment_status = unique.employment.status, ov_employment_industry = unique.employment.industry, ov_employment_occupation = unique.employment.occupation)
+```
+
+Row {data-height=500}
+-------------------------------------
+
+```{r 2_output}
+renderPlot({
+  subdata <- data[get(age.group.name) %in% input$ov_age_group & get(education.name) %in% input$ov_education & get(race.name) %in% input$ov_race & get(sex.name) %in% input$ov_sex & get(income.poverty.name) %in% input$ov_income_poverty & get(marital.status.name) %in% input$ov_marital_status & get(house.status.name) %in% input$ov_house_status & get(geo.name) %in% input$ov_geo & get(msa.name) %in% input$ov_msa & get(employment.status.name) %in% input$ov_employment_status & get(employment.industry.name) %in% input$ov_employment_industry & get(employment.occupation.name) %in% input$ov_employment_occupation]
+  
+  subdata[, (opinion.factors) := lapply(.SD, function(x){replace(x, is.na(x), "NA")}), .SD = opinion.factors]
+  subdata[, (opinion.factors) := lapply(X = .SD, FUN = as.factor), .SDcols = opinion.factors]
+  
+  rates <- subdata[, .(pct = .N/nrow(subdata)*100), keyby = get(input$ov_opinion.factors)]
+  
+  barplot(height = rates[, pct], names.arg = rates[, get], space = 0.01, las = 1, main = input$ov_opinion.factors, ylab = sprintf("Rate of %s", input$ov_opinion.factors), ylim = c(-5, 75), xaxt = "n", axes = F, col = "skyblue2")
+  axis(side = 2, at = 20*(0:5), las = 2)
+  text(x = -0.4 + 1:rates[, .N], y = -5, labels = rates[, get], srt = 0, xpd = TRUE, adj = 1)
+  
+  if(input$ov_show_percentages == TRUE){
+    space_val = 0
+    text(x = -0.4 + 1:rates[, .N] * (1 + space_val), y = rates[, pct], labels = sprintf("%.*f%%", input$ov_digits, rates[, pct]), pos = 3)
+  }
+})
+
+renderText({
+  if (input$ov_opinion.factors == "opinion_h1n1_vacc_effective"){
+    paste("Respondent's opinion about H1N1 vaccine effectiveness: 1 = Not at all effective; 2 = Not very effective; 3 = Don't know; 4 = Somewhat effective; 5 = Very effective; NA = Missing responses.")
+  } else if (input$ov_opinion.factors == "opinion_h1n1_risk"){
+    paste("Respondent's opinion about risk of getting sick with H1N1 flu without vaccine: 1 = Very Low; 2 = Somewhat low; 3 = Don't know; 4 = Somewhat high; 5 = Very high; NA = Missing responses.")
+    } else if (input$ov_opinion.factors == "opinion_h1n1_sick_from_vacc"){
+      paste("Respondent's worry of getting sick from taking H1N1 vaccine: 1 = Not at all worried; 2 = Not very worried; 3 = Don't know; 4 = Somewhat worried; 5 = Very worried; NA = Missing responses.")
+      } else if (input$ov_opinion.factors == "opinion_seas_vacc_effective"){
+        paste("Respondent's opinion about seasonal flu vaccine effectiveness: 1 = Not at all effective; 2 = Not very effective; 3 = Don't know; 4 = Somewhat effective; 5 = Very effective; NA = Missing responses.")
+        } else if (input$ov_opinion.factors == "opinion_seas_risk"){
+          paste("Respondent's opinion about risk of getting sick with seasonal flu without vaccine: 1 = Very Low; 2 = Somewhat low; 3 = Don't know; 4 = Somewhat high; 5 = Very high; NA = Missing responses.")
+          } else {
+            paste("Respondent's worry of getting sick from taking seasonal flu vaccine: 1 = Not at all worried; 2 = Not very worried; 3 = Don't know; 4 = Somewhat worried; 5 = Very worried; NA = Missing responses.")
+            }
+})
+```
+
+
+Preventive Behaviors
+===================================== 
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r 3_input}
+inputPanel(
+  selectInput(inputId = "pb_behavioral.factors", label = "Select Preventive Behaviors:", choices = behavioral.factors, selected = behavioral.factors[1]),
+  checkboxInput(inputId = "pb_show_percentages", label = "Show Percentages", value = TRUE),
+  sliderInput(inputId = "pb_digits", label = "Digits", min = 0, max = 5, value = 1, step = 1),
+  selectInput(inputId = "pb_age_group", label = "Age", choices = unique.age.groups, selected = unique.age.groups, multiple = TRUE),
+  selectInput(inputId = "pb_education", label = "Education", choices = unique.education, selected = unique.education, multiple = TRUE),
+  selectInput(inputId = "pb_race", label = "Race", choices = unique.race, selected = unique.race, multiple = TRUE),
+  selectInput(inputId = "pb_sex", label = "Sex", choices = unique.sex, selected = unique.sex, multiple = TRUE),
+  selectInput(inputId = "pb_income_poverty", label = "Household Income", choices = unique.income.poverty, selected = unique.income.poverty, multiple = TRUE),
+  selectInput(inputId = "pb_marital_status", label = "Marital Status", choices = unique.marital.status, selected = unique.marital.status, multiple = TRUE),
+  selectInput(inputId = "pb_house_status", label = "House Status", choices = unique.house.status, selected = unique.house.status, multiple = TRUE),
+  selectInput(inputId = "pb_geo", label = "Geographic Region", choices = unique.geo, selected = unique.geo, multiple = TRUE),
+  selectInput(inputId = "pb_msa", label = "Metropolitan Statistical Area", choices = unique.msa, selected = unique.msa, multiple = TRUE),
+  selectInput(inputId = "pb_employment_status", label = "Employment Status", choices = unique.employment.status, selected = unique.employment.status, multiple = TRUE),
+  selectInput(inputId = "pb_employment_industry", label = "Employment Industry", choices = unique.employment.industry, selected = unique.employment.industry, multiple = TRUE),
+  selectInput(inputId = "pb_employment_occupation", label = "Employment Occupation", choices = unique.employment.occupation, selected = unique.employment.occupation, multiple = TRUE)
+)
+# input = list(pb_behavioral.factors = behavioral.factors[1], pb_show_percentages = TRUE, pb_digits = 1, pb_age_group = unique.age.groups, pb_education = unique.education, pb_race = unique.race, pb_sex = unique.sex, pb_income_poverty = unique.income.poverty, pb_marital_status = unique.marital.status, pb_house_status = unique.house.status, pb_geo = unique.geo, pb_msa = unique.msa, pb_employment_status = unique.employment.status, pb_employment_industry = unique.employment.industry, pb_employment_occupation = unique.employment.occupation)
+```
+
+Row {data-height=500}
+-------------------------------------
+
+```{r 3_output}
+renderPlot({
+  subdata <- data[get(age.group.name) %in% input$pb_age_group & get(education.name) %in% input$pb_education & get(race.name) %in% input$pb_race & get(sex.name) %in% input$pb_sex & get(income.poverty.name) %in% input$pb_income_poverty & get(marital.status.name) %in% input$pb_marital_status & get(house.status.name) %in% input$pb_house_status & get(geo.name) %in% input$pb_geo & get(msa.name) %in% input$pb_msa & get(employment.status.name) %in% input$pb_employment_status & get(employment.industry.name) %in% input$pb_employment_industry & get(employment.occupation.name) %in% input$pb_employment_occupation]
+  
+  subdata[, (behavioral.factors) := lapply(.SD, function(x){replace(x, is.na(x), "NA")}), .SD = behavioral.factors]
+  subdata[, (behavioral.factors) := lapply(X = .SD, FUN = as.factor), .SDcols = behavioral.factors]
+  
+  rates <- subdata[, .(pct = .N/nrow(subdata)*100), keyby = get(input$pb_behavioral.factors)]
+  
+  barplot(height = rates[, pct], names.arg = rates[, get], space = 0.01, las = 1, main = input$pb_behavioral.factors, ylab = sprintf("Rate of %s", input$pb_behavioral.factors), ylim = c(-5, 110), xaxt = "n", axes = F, col = "skyblue2")
+  axis(side = 2, at = 20*(0:5), las = 2)
+  text(x = -0.4 + 1:rates[, .N], y = -5, labels = rates[, get], srt = 0, xpd = TRUE, adj = 1)
+  
+  if(input$pb_show_percentages == TRUE){
+    space_val = 0
+    text(x = -0.4 + 1:rates[, .N] * (1 + space_val), y = rates[, pct], labels = sprintf("%.*f%%", input$pb_digits, rates[, pct]), pos = 3)
+  }
+})
+
+renderText({
+  if (input$pb_behavioral.factors == "behavioral_antiviral_meds"){
+    paste("Has taken antiviral medications: 0 = No; 1 = Yes; NA = Missing responses.")
+  } else if (input$pb_behavioral.factors == "behavioral_avoidance"){
+    paste("Has avoided close contact with others with flu-like symptoms: 0 = No; 1 = Yes; NA = Missing responses.")
+    } else if (input$pb_behavioral.factors == "behavioral_face_mask"){
+      paste("Has bought a face mask: 0 = No; 1 = Yes; NA = Missing responses.")
+      } else if (input$pb_behavioral.factors == "behavioral_wash_hands"){
+        paste("Has frequently washed hands or used hand sanitizer: 0 = No; 1 = Yes; NA = Missing responses.")
+        } else if (input$pb_behavioral.factors == "behavioral_large_gatherings"){
+          paste("Has reduced time at large gatherings: 0 = No; 1 = Yes; NA = Missing responses.")
+          } else if (input$pb_behavioral.factors == "behavioral_outside_home"){
+          paste("Has reduced contact with people outside of own household: 0 = No; 1 = Yes; NA = Missing responses.")
+            } else {
+              paste("Has avoided touching eyes, nose, or mouth: 0 = No; 1 = Yes; NA = Missing responses.")
+              }
+})
+```
+
+
+Prediction Models
+===================================== 
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r 4_input}
+inputPanel(
+  selectInput(inputId = "pm_target", label = "Target Variable:", choices = c(h1n1.vacc, seas.vacc), selected = h1n1.vacc),
+  sliderInput(inputId = "pm_important_features", label = "Show Important Features", min = 5, max = 20, value = 10, step = 1),
+  sliderInput(inputId = "pm_nround", label = "nround for XGBoost", min = 100, max = 1000, value = 200, step = 100)
+)
+# input = list(pm_target = h1n1.vacc, pm_important_features = 10, pm_nround = 200)
+```
+
+```{r 4_preprocessing}
+# Handle missing values
+cols <- c("h1n1_concern", "h1n1_knowledge", "doctor_recc_h1n1", "doctor_recc_seasonal", "chronic_med_condition",
+          "child_under_6_months", "health_worker", "health_insurance", "household_adults", "household_children", behavioral.factors)
+data[ , (cols) := lapply(.SD, nafill, fill = 0), .SDcols = cols]
+cols <- opinion.factors
+data[ , (cols) := lapply(.SD, nafill, fill = 3), .SDcols = cols]
+  
+# Transform the variables into boolean variables
+cols <- c("doctor_recc_h1n1", "doctor_recc_seasonal", "chronic_med_condition", "child_under_6_months", 
+          "health_worker", "health_insurance")
+data <- data[, (cols) := lapply(X = .SD, FUN = as.logical), .SDcols = cols]
+data <- data[, (cols) := lapply(X = .SD, FUN = as.factor), .SDcols = cols]
+  
+# Drop the id column
+data[, id.name] <- NULL
+```
+
+```{r 4_output}
+renderDataTable({
+  # Fit model
+  fit.model(data = data, target.name = input$pm_target, number = input$pm_important_features, nround = input$pm_nround)
+})
+```

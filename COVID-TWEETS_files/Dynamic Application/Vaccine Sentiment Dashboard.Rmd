@@ -1,0 +1,544 @@
+---
+title: "Vaccine Sentiments Dashboard "
+runtime: shiny
+output: 
+  flexdashboard::flex_dashboard:
+    #theme: cerulean
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(rmarkdown)
+library(knitr)
+library(Hmisc)
+library(DT)
+library(data.table)
+library(stringr)
+library(tidytext)
+library(dplyr)
+library(lexicon)
+library(RColorBrewer)
+library(tidyr)
+library(wordcloud)
+library(ggplot2)
+assignInNamespace("cedta.override", c(data.table:::cedta.override,"rmarkdown"), "data.table")
+
+opts_chunk$set(echo = FALSE, comment="", warning = FALSE, message = FALSE, tidy.opts=list(width.cutoff=55), tidy = TRUE)
+```
+
+```{r read data}
+#df68 = read.csv("/Users/Demi/Downloads/Data Science Consulting/COVID-TWEETS_files/covid19_tweets_1.csv")
+#df34 = read.csv("/Users/Demi/Downloads/Data Science Consulting/COVID-TWEETS_files/2020-03-29 Coronavirus Tweets.CSV")
+#dfvaccine = read.csv("/Users/Demi/Downloads/Data Science Consulting/COVID-TWEETS_files/mastervaccine.csv")
+#df4 = read.csv("/Users/Demi/Downloads/Data Science Consulting/COVID-TWEETS_files/2020-04-30 Coronavirus Tweets.CSV")
+```
+
+
+```{r clean data}
+#df68 = df68[,c('date','text')]
+#df34 = df34[,c('created_at','text')]
+#df4 = df4[,c('created_at','text')]
+#names(df34)[1] = 'date'
+#names(df4)[1] = 'date'
+#dfcovid = rbind(df68,df34,df4)
+#dfcovid = as.data.table(dfcovid)
+
+#dfcovid$date = substr(dfcovid$date,1,10)
+#dfcovid[date == '2020-03-29' ,month:= 'March']
+#dfcovid[date == '2020-04-30' ,month:= 'April']
+#dfcovid[date >= '2020-07-01' & date < '2020-08-01',month:= 'July']
+#dfcovid[date >= '2020-08-01',month:= 'August']
+
+#dfcovid$month = factor(dfcovid$month, levels = month.name, ordered = TRUE)
+
+#dfvaccine = dfvaccine[,c('date','tweet')]
+#dfvaccine$date = substr(dfvaccine$date,7,10)
+#dfvaccine = as.data.table(dfvaccine)
+#dfvaccine2019 = dfvaccine[date == '2019', ]
+#dfvaccine2019 = dfvaccine[,date:= NULL]
+#setnames(dfvaccine2019, "tweet", "text")
+
+#dfcovid = dfcovid %>%
+#  group_by(month) %>%
+#  sample_frac(0.01)
+
+#dfvaccine2019 = dfvaccine2019 %>% sample_frac(0.01)
+
+#dfcovid = as.data.table(dfcovid)
+#dfvaccine2019 = as.data.table(dfvaccine2019)
+#write.csv(dfcovid, "/Users/Demi/Downloads/Data Science Consulting/COVID-TWEETS_files/sampledfcovid.csv")
+#write.csv(dfvaccine2019, "/Users/Demi/Downloads/Data Science Consulting/COVID-TWEETS_files/sampledfvaccine2019.csv")
+```
+
+```{r read new sample data}
+dfvaccine2019 = fread("../data/sampledfvaccine2019.csv")
+dfcovid = fread("../data/sampledfcovid.csv")
+dfvaccine2019 [,V1:= NULL]
+dfvaccine2019 = rename(dfvaccine2019,'text'='V2')
+
+```
+
+```{r function}
+tokens = function (df,filters){
+  words = df%>%
+  unnest_tokens(input = text, output = word)%>%
+  dplyr::select(word)%>%
+  anti_join(stop_words) %>%
+  filter(!word %in% filters)
+  return (words)
+}
+
+tokens.covvaccine = function (df,filters){
+  words = df%>%
+  filter(str_detect(str_to_lower(text), "vaccine")) %>%
+  unnest_tokens(input = text, output = word)%>%
+  dplyr::select(word)%>%
+  anti_join(stop_words) %>%
+  filter(!word %in% filters)
+  return (words)
+}
+
+token.vaccines = function (df,filters,disease){
+  words = df%>%
+  filter(str_detect(str_to_lower(text), disease)) %>%
+  unnest_tokens(input = text, output = word)%>%
+  dplyr::select(word)%>%
+  anti_join(stop_words) %>%
+  filter(!word %in% filters)
+  return (words)
+}
+
+
+```
+
+
+```{r constants}
+months = c("July","August","March","April")
+tables = c("Covid tweets from March to August", "Overall vaccine tweets")
+metrics = c('Tweets contains covid','Tweets contains vaccine','mean characters per tweet','mean words per tweet','Tweets with Upper Cases','Tweets contains flu','Tweets contains H1N1')
+trends = c('Covid Vaccines Tweets%','Positivity Trends','Sentiment Scores')
+
+filters_vaccine = c("vaccine",'vaccination','http','bit.ly','pic.twitter.com','la','de','anti','fb.me', 'twitter.com','ow.ly','le','dlvr.it','rt','https','en', 'à','2','des')
+filters_covid = c("t.co", "https",'de','coronavirus','covid19','covid_19','en','el','amp','covid','por','19','del','los','le','se','para','con','les','es','las','la','1','2','al','à','di','3','una','il','si','lo','des','du','positive')
+
+
+nrc = read.table(file = 'https://raw.githubusercontent.com/pseudorational/data/master/nrc_lexicon.txt',header = F,col.names = c('word','sentiment','num'),sep = '\t'); nrc = nrc[nrc$num!=0,]; nrc$num = NULL
+
+#change nrc based on Covid situation, confirmed, continue, increase should be negative.
+nrc1 = nrc %>% mutate(sentiment=replace(sentiment, word %in% c('confirmed','continue', 'increase','highest'), 'negative'))
+
+bing = as.data.table(get_sentiments('bing'))
+bing = bing %>% mutate(sentiment=replace(sentiment, word %in% c('confirmed','continue', 'increase','highest'), 'negative'))
+
+```
+
+```{r variables}
+dfvaccine_word = tokens(dfvaccine2019,filters_vaccine)
+
+dfvaccine.flu_word = token.vaccines(dfvaccine2019,filters_vaccine,'flu')
+
+dfvaccine.h1n1_word = token.vaccines(dfvaccine2019,filters_vaccine,'h1n1')
+
+dfcovid_word = c(
+  tokens(dfcovid[month == 'March',],filters_covid),
+  tokens(dfcovid[month == 'April',],filters_covid),
+  tokens(dfcovid[month == 'July',],filters_covid),
+  tokens(dfcovid[month == 'August',],filters_covid))
+names(dfcovid_word) = c("March","April","July","August")
+
+dfcovvaccine_word = c(
+  tokens.covvaccine(dfcovid[month == 'March',],filters_covid),
+  tokens.covvaccine(dfcovid[month == 'April',],filters_covid),
+  tokens.covvaccine(dfcovid[month == 'July',],filters_covid),
+  tokens.covvaccine(dfcovid[month == 'August',],filters_covid))
+names(dfcovvaccine_word) = c("March","April","July","August")
+
+df_vaccine_positivity = dfcovid%>%
+      filter(str_detect(str_to_lower(text), "vaccine")) %>%
+      unnest_tokens(output = word, input = text)%>%
+      inner_join(get_sentiments('bing'))%>%group_by(sentiment,month)%>%count()
+df_vaccine_positivity$month = factor(df_vaccine_positivity$month, levels = month.name, ordered = TRUE)
+df_vaccine_positivity = df_vaccine_positivity[order(df_vaccine_positivity$month),]
+    
+df_sentiment.score = 
+  df_vaccine_positivity %>%
+  group_by(month)%>%
+  mutate(sentiment.score = (diff(n)/max(n)) *100) %>%
+  filter(sentiment == 'negative') %>%
+  select(month,sentiment.score)
+
+```
+
+Introduction
+===================================
+
+The current analysis is based on two integrated datasets:
+
+1) The covid tweets data from March to August
+2) The vaccine tweets data in 2019
+
+The original records contain full covid tweets from March to August and the vaccine tweets from 2009 to 2019. However, the current analysis only takes 1% of the original data to ensure application performance. The analyses on vaccine tweets data in 2019 function as a baseline for sentiment analysis. The current dashboard combines analyses of two datasets for easier comparison and better interpretation.
+
+The analysis is comprised of 5 different sections:
+
+1. **Basic Info**: Introduce exploratory data analysis on some basic metrics about the two data sets.
+2. **Most Common Words**: Graphs to show most commonly mentioned words used in the covid tweets data by month and the vaccine tweets data. Users will be able to select top 1-25 words to investigate. 
+3. **Positivity Scores**: Graphs to compare the amount of negative and positive words used in the covid tweets data by month and the vaccine tweets data. User will also be able to filter and see the positivity score of:
+
+    a. tweets on covid vaccine from the covid tweets data
+    b. tweets on flu vaccine from the vaccine tweets data
+    c. tweets on H1N1 vaccine from the vaccine tweets data
+    
+4. **Emotions about Vaccines**: Graphs to show emotions of words used in the covid tweets data by month and the vaccine tweets data.
+5. **Trends**: Graphs to show the trend of Covid vaccine tweets.
+
+Basic Info 
+===================================
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r input}
+#inputPanel(
+#  selectInput(inputId="select.table1", label = "Select Table:", choices = tables, selected = tables[1]),
+#  selectInput(inputId="select.month1", label = "Select Month:", choices = months, selected = months[1]),
+#  selectInput(inputId="select.metrics", label = "Select Metrics:", choices = metrics, selected = metrics, multiple = TRUE))
+
+#input <- list(select.table1 =tables[2], select.month1 = months[1],select.metrics = metrics[6:7],show.trend = FALSE)
+inputPanel(
+  selectInput(inputId="select.table1", label = "Select Table:", choices = tables, selected = tables[1]),
+  conditionalPanel(condition = "input$select.table1 == 'Covid tweets from March to August'",selectInput(inputId="select.month1", label = "Select Month:", choices = months, selected = months[1])),
+  selectInput(inputId="select.metrics", label = "Select Metrics:", choices = metrics, selected = metrics, multiple = TRUE)
+  #checkboxInput(inputId = "show.trend ", label = "Show trend of Covid Vaccine", value = FALSE)
+)
+
+
+```
+
+
+Row {data-height=500}
+-------------------------------------
+
+```{r output}
+
+renderDataTable({ 
+  
+  if (input$select.table1 == "Covid tweets from March to August"){
+    if ('Tweets contains covid' %in% input$select.metrics){
+    percentage_tweets_covid = dfcovid[month == input$select.month1, round(mean(str_detect(string=tolower(text),pattern='(co)|(cov)'))*100,2)]
+  }
+    if (!'Tweets contains covid' %in% input$select.metrics){
+    percentage_tweets_covid = NULL
+  }
+    if ('Tweets contains vaccine' %in% input$select.metrics){
+    percentage_tweets_vaccine = dfcovid[month == input$select.month1, round(mean(str_detect(string=tolower(text),pattern='vaccine'))*100,2)]
+  }
+    if (!'Tweets contains vaccine' %in% input$select.metrics){
+    percentage_tweets_vaccine = NULL
+  }
+    if ('mean characters per tweet' %in% input$select.metrics){
+    mean_char = dfcovid[month == input$select.month1, round(mean(nchar(text)),0)]
+  }
+    if (!'mean characters per tweet' %in% input$select.metrics){
+    mean_char = NULL
+  }
+    if ('mean words per tweet' %in% input$select.metrics){
+    mean_words = dfcovid[month == input$select.month1, round(mean(str_count(string = text,pattern = '\\S+')),0)]
+  }
+    if (!'mean words per tweet' %in% input$select.metrics){
+    mean_words = NULL
+  }
+    if ('Tweets with Upper Cases' %in% input$select.metrics){
+    percentage_Upper = dfcovid[month == input$select.month1, round(mean(str_count(text,pattern='[A-Z]')/nchar(text))*100,2)]
+  }
+    if (!'Tweets with Upper Cases' %in% input$select.metrics){
+    percentage_Upper = NULL
+    }
+    percentage_flu = 'NA'
+    percentage_H1N1 = 'NA'
+   
+  }
+  
+  if (input$select.table1 == "Overall vaccine tweets"){
+  if ('Tweets contains flu' %in% input$select.metrics){
+    percentage_flu =  round(mean(str_detect(string=tolower(dfvaccine2019$text),pattern='flu'))*100,2)
+  }
+  if (!'Tweets contains flu' %in% input$select.metrics){
+    percentage_flu = NULL
+  }
+  if ('Tweets contains H1N1' %in% input$select.metrics){
+    percentage_H1N1 = round(mean(str_detect(string=tolower(dfvaccine2019$text),pattern='h1n1'))*100,2)
+  }
+  if (!'Tweets contains H1N1' %in% input$select.metrics){
+    percentage_H1N1 = NULL
+  }
+  percentage_tweets_covid = 'NA'
+  percentage_tweets_vaccine = 'NA'
+  mean_char = 'NA'
+  mean_words = 'NA'
+  percentage_Upper= 'NA'
+ 
+  }
+  
+   values = c(percentage_tweets_covid,percentage_tweets_vaccine,mean_char,mean_words,percentage_Upper,percentage_flu,percentage_H1N1)
+  a = data.table('Metrics'=input$select.metrics,values)
+  
+  datatable(a)
+  
+})
+
+```
+
+Most Common Words
+===================================
+
+
+Row {data-height=500}
+-------------------------------------
+```{r}
+inputPanel(
+  selectInput(inputId="select.table2", label = "Select Table:", choices = tables, selected = tables[1]),
+  selectInput(inputId="select.month2", label = "Select Month:", choices = months, selected = months[1]),
+  sliderInput(inputId = "Top_n_display", label = "Show Top n Words", min = 1, max = 25, value = 20, step = 1)
+)
+
+
+#input <- list(select.table2 =tables[2], select.month2 = months[1],Top_n_display = 3)
+```
+
+
+Row {data-height=500}
+-------------------------------------
+```{r}
+
+renderPlot({
+if (input$select.table2 == "Covid tweets from March to August"){
+  dat = as.data.table(dfcovid_word[input$select.month2])
+  dat = rename(dat,'word'=input$select.month2)
+  dfcovid_plot1 =dat %>%
+  group_by(word)%>%
+  summarize(count = n())%>%
+  ungroup()%>%
+  arrange(desc(count))%>%
+  top_n(input$Top_n_display) %>%
+  ggplot(aes(x=reorder(word,count), y=count, fill=count))+
+    geom_col()+
+    xlab('words')+
+    coord_flip()
+print(dfcovid_plot1)
+}
+  
+if (input$select.table2 == "Overall vaccine tweets"){
+  dfvaccine_plot1 = dfvaccine_word%>%
+  group_by(word)%>%
+  summarize(count = n())%>%
+  ungroup()%>%
+  arrange(desc(count))%>%
+  top_n(input$Top_n_display) %>%
+  ggplot(aes(x=reorder(word,count), y=count, fill=count))+
+    geom_col()+
+    xlab('words')+
+    coord_flip()
+print(dfvaccine_plot1)
+}
+
+})
+
+```
+
+Positivity Scores
+===================================
+  
+  
+  Row {data-height=500}
+-------------------------------------
+```{r}
+inputPanel(
+  selectInput(inputId="select.table3", label = "Select Table:", choices = tables, selected = tables[1]),
+  selectInput(inputId="select.month3", label = "Select Month:", choices = months, selected = months[1]),
+  checkboxInput(inputId = "covid.vaccine", label = "Only tweets about Covid vaccine", value = TRUE),
+  checkboxInput(inputId = "flu.vaccine.1", label = "Only tweets about flu vaccine", value = FALSE),
+  checkboxInput(inputId = "h1n1.vaccine.1", label = "Only tweets about H1N1 vaccine", value = FALSE)
+)
+
+#input <- list(select.table3 =tables[1], select.month3 = months[1],covid.vaccine = TRUE)
+```
+
+
+Row {data-height=500}
+-------------------------------------
+  
+```{r}
+renderPlot({
+  if (input$select.table3 == "Covid tweets from March to August"){
+    if (input$covid.vaccine == FALSE) {
+      dat = as.data.table(dfcovid_word[input$select.month3])
+      dat = rename(dat,'word'=input$select.month3)
+      dfcovid_plot2 = dat%>%
+        inner_join(bing)%>%
+        group_by(sentiment)%>%
+        count()%>%
+        ggplot(aes(x=sentiment,y=n,fill=sentiment))+geom_col()+
+        guides(fill=F)+coord_flip()+scale_fill_brewer(palette="Paired")
+    }
+    if (input$covid.vaccine == TRUE) {
+      dat = as.data.table(dfcovvaccine_word[input$select.month3])
+      dat = rename(dat,'word'=input$select.month3)
+      dfcovid_plot2 = dat%>%
+        inner_join(bing)%>%
+        group_by(sentiment)%>%
+        count()%>%
+        ggplot(aes(x=sentiment,y=n,fill=sentiment))+geom_col()+
+        guides(fill=F)+coord_flip()+scale_fill_brewer(palette="Paired")
+    }
+    print(dfcovid_plot2)
+  }
+  if (input$select.table3 == "Overall vaccine tweets"){
+    if (input$flu.vaccine.1 == TRUE){
+      dfvaccine.flu_word%>%
+        inner_join(get_sentiments('bing'))%>%
+        group_by(sentiment)%>%
+        count()%>%
+        ggplot(aes(x=sentiment,y=n,fill=sentiment))+geom_col()+guides(fill=F)+
+        coord_flip()+scale_fill_brewer(palette="Paired")
+    }
+    else if (input$h1n1.vaccine.1 == TRUE) {
+      dfvaccine.h1n1_word%>%
+        inner_join(get_sentiments('bing'))%>%
+        group_by(sentiment)%>%
+        count()%>%
+        ggplot(aes(x=sentiment,y=n,fill=sentiment))+geom_col()+guides(fill=F)+
+        coord_flip()+scale_fill_brewer(palette="Paired")
+    }
+    
+    else{
+      dfvaccine_plot2 = dfvaccine_word%>%
+      inner_join(get_sentiments('bing'))%>%
+      group_by(sentiment)%>%
+      count()%>%
+      ggplot(aes(x=sentiment,y=n,fill=sentiment))+geom_col()+guides(fill=F)+
+      coord_flip()+scale_fill_brewer(palette="Paired")
+    print(dfvaccine_plot2)
+    }
+    
+  }
+})
+```
+
+
+Emotions about Vaccines
+===================================
+  
+  
+  Row {data-height=500}
+-------------------------------------
+```{r}
+inputPanel(
+  selectInput(inputId="select.table4", label = "Select Table:", choices = tables, selected = tables[1]),
+  selectInput(inputId="select.month4", label = "Select Month:", choices = months, selected = months[1]),
+  checkboxInput(inputId = "flu.vaccine", label = "Only tweets about flu vaccine", value = FALSE),
+  checkboxInput(inputId = "h1n1.vaccine", label = "Only tweets about H1N1 vaccine", value = FALSE)
+)
+
+#input <- list(select.table4 =tables[1], select.month4 = months[1],flu.vaccine = FALSE, h1n1.vaccine = FALSE)
+```
+
+
+
+Row {data-height=500}
+-------------------------------------
+```{r}
+renderPlot({
+  if (input$select.table4 == "Covid tweets from March to August"){
+    dat = as.data.table(dfcovvaccine_word[input$select.month4])
+    dat = rename(dat,'word'=input$select.month4)
+    dfcovid_plot3 = dat %>%
+      inner_join(nrc1,by = 'word')%>%
+      dplyr::select('sentiment')%>%
+      group_by(sentiment)%>%
+      summarize(freq=n())%>%
+      ungroup() %>%
+      ggplot(aes(x=reorder(sentiment,desc(freq)),y=freq,fill=freq))+geom_bar(position='dodge',stat='identity')+xlab('Sentiment')+ylab('Frequency')+coord_flip()
+    
+    print(dfcovid_plot3)
+  }
+  
+  if (input$select.table4 == "Overall vaccine tweets"){
+    if (input$flu.vaccine == TRUE) {
+      dfvaccine_plot3 = dfvaccine.flu_word%>%
+        inner_join(get_sentiments('nrc'),by = 'word')%>%
+        dplyr::select('sentiment')%>%
+        group_by(sentiment)%>%
+        summarize(freq=n())%>%
+        ungroup() %>%
+        ggplot(aes(x=reorder(sentiment,desc(freq)),y=freq,fill=freq))+geom_bar(position='dodge',stat='identity')+xlab('Sentiment')+ylab('Frequency')+coord_flip()
+    }
+    else if (input$h1n1.vaccine == TRUE) {
+      dfvaccine_plot3 = dfvaccine.h1n1_word%>%
+        inner_join(get_sentiments('nrc'),by = 'word')%>%
+        dplyr::select('sentiment')%>%
+        group_by(sentiment)%>%
+        summarize(freq=n())%>%
+        ungroup() %>%
+        ggplot(aes(x=reorder(sentiment,desc(freq)),y=freq,fill=freq))+geom_bar(position='dodge',stat='identity')+xlab('Sentiment')+ylab('Frequency')+coord_flip()
+    }
+    else {
+      dfvaccine_plot3 = dfvaccine_word%>%
+        inner_join(get_sentiments('nrc'),by = 'word')%>%
+        dplyr::select('sentiment')%>%
+        group_by(sentiment)%>%
+        summarize(freq=n())%>%
+        ungroup() %>%
+        ggplot(aes(x=reorder(sentiment,desc(freq)),y=freq,fill=freq))+geom_bar(position='dodge',stat='identity')+xlab('Sentiment')+ylab('Frequency')+coord_flip()
+    }
+    
+    print(dfvaccine_plot3)
+  }
+  
+})
+```
+
+Trends
+===================================
+
+  Row {data-height=500}
+-------------------------------------
+```{r}
+inputPanel({
+  selectInput(inputId="select.trends", label = "Select Trends:", choices = trends, selected = trends[1])
+})
+```
+
+  Row {data-height=500}
+-------------------------------------
+```{r}
+renderPlot({
+  if (input$select.trends == 'Covid Vaccines Tweets%') {
+    a = dfcovid[,round(mean(str_detect(string=tolower(text),pattern='vaccine'))*100,2), by = month]
+    a = rename(a, 'Covid.Vaccines.Tweets' = 'V1')
+    a$month = factor(a$month, levels = month.name, ordered = TRUE)
+    ggplot(data = a, aes(x = month, y = Covid.Vaccines.Tweets)) + geom_bar(stat = 'identity', fill = "skyblue2")
+  }
+  
+  else if (input$select.trends == 'Positivity Trends') {
+    
+    df_propotion = df_vaccine_positivity %>%group_by(month) %>%
+      mutate(proportion = n/sum(n))
+    
+    df_propotion[order(df_propotion$month),] %>%
+      ggplot(aes(x=month,y=proportion,fill=sentiment))+
+      geom_col()+
+      coord_flip()+scale_fill_brewer(palette="Paired")
+  }
+  
+  else {
+ ggplot(df_sentiment.score, aes(x = month, y = sentiment.score))+
+  geom_bar(stat = 'identity',fill =  "skyblue2")
+  }
+})
+
+```
+
+
